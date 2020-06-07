@@ -2,7 +2,7 @@ package pithy
 
 
 var (
-  Urlmap := make(map[string]Handler)
+  Urlmap = make(map[string]Handler)
 )
 
 type Handler func(r Req) Resp

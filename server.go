@@ -4,8 +4,7 @@ import (
 	"io"
 	"log"
 	"net/http"
-  "os/exec"
-  "time"
+
 )
 
 func Start() {
@@ -16,13 +15,14 @@ func Start() {
   }
 
   http.HandleFunc("/hello", helloHandler)
-  go openBrowser()
   log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func openBrowser() {
-  time.Sleep(time.Second)
+func OpenBrowser(url string) {
+  go func() {
+    time.Sleep(time.Second)
 
-  cmd := exec.Command("xdg-open", "http://as:8080/hello")
-  cmd.Run()
+    cmd := exec.Command("xdg-open", url)
+    cmd.Run()
+  }()
 }

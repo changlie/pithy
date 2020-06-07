@@ -7,5 +7,6 @@ import (
 
 func TestStart(t *testing.T) {
   fmt.Println("test action...")
+  OpenBrowser("http://as:8080/hello")
   Start()
 }

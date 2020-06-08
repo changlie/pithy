@@ -1,0 +1,108 @@
+func simpleServer() {
+  http.HandleFunc("/", mainHandler)
+  log.Fatal(http.ListenAndServe(":8888", nil))
+}
+
+func mainHandler(w http.ResponseWriter,r *http.Request)  {
+  url := r.URL.RawPath
+  fmt.Println(url)
+
+  h := getHandler(url)
+  if h == nil {
+    w.WriteHeader(404)
+    fmt.Fpintln(w, "service is not found!")
+    return 
+  }
+
+  fmt.Fprintf(w, "response for %v \n", url)
+}
+
+var (
+  Urlmap = make(map[uri]Handler)
+)
+
+func getHandler(url string) Handler {
+  u := NewUri(url)
+  for p, h := range Urlmap {
+    if p.equal(u) {
+      return h
+    }
+  }
+  return nil
+}
+
+type uri struct {
+  url string
+  subUrls []string
+}
+
+func NewUri(url string) {
+  paths := strings.Split(url, "/")
+  return uri{url, paths}
+}
+
+func (u *uri) equal(target uri) bool {
+  subUrls1 := target.subUrls
+  for i, subUrl := range u.subUrls {
+    if i >= len(subUrls1) {
+      return false
+    }
+    subUrl1 := subUrls1[i]
+    if subUrl != subUrl1 && !strings.HasPrefix(subUrl, ":") {
+      return false
+    }
+  }
+  return true
+}
+
+type Handler func(r Req) Resp
+
+type Req struct {
+  Args map[string]string
+  Header http.Header
+}
+
+func (r *Req) getArg(name string) string {
+  return r.Args[name]
+}
+
+type Resp struct {
+  data interface{}
+  t respType
+}
+
+const (
+  respJson RespType = 1 << iota
+  respFile
+)
+
+func RespJson(d interface{}) *Resp {
+  return &Resp{
+    data: d,
+    t: respJson,
+  }
+}
+
+func RespFile(path string) *Resp {
+  return &Resp{
+    data: d,
+    t: respFile,
+  }
+}
+
+func (resp *Resp) isJson() bool {
+  return (resp.t & respJson) != 0
+}
+
+func (resp *Resp) isFile() bool {
+  return (resp.t & respFile) != 0
+}
+
+type Json interface {
+  JsonString() string
+}
+
+
+func Users(r Req) Resp {
+
+}

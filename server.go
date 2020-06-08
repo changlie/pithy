@@ -1,7 +1,7 @@
 package pithy
 
 import (
-  "io"
+  // "io"
   "log"
   "net/http"
   "os/exec"
@@ -9,14 +9,8 @@ import (
 )
 
 func Start() {
-  // Hello world, the web server
-
-  helloHandler := func(w http.ResponseWriter, req *http.Request) {
-    io.WriteString(w, "Hello, world!\n")
-  }
-
-  http.HandleFunc("/hello", helloHandler)
-  log.Fatal(http.ListenAndServe(":8080", nil))
+  http.HandleFunc("/", mainHandler)
+  log.Fatal(http.ListenAndServe(":8888", nil))
 }
 
 func OpenBrowser(url string) {

@@ -1,1 +1,176 @@
+#####app.conf#####dev.mode=true
+
+server.context=ws
+server.port=8989
+
+service.pkg=service
+~~~~~~~~~~~~~~~~~~~~
+#####src\internel_pithy_gen\init_handler.go#####package internel_pithy_gen
+
+import pt "changlie/pithy"
+import s "service"
+
+func init() {
+    pt.SetHandler("/employee/list", s.EmployeeList)
+    pt.SetHandler("/employee/create", s.EmployeeCreate)
+
+
+    var roleserviceimpl *s.RoleServiceImpl
+    pt.SetHandler("/role/list", roleserviceimpl.RoleList)
+    pt.SetHandler("/create/role", s.CreateRole)
+    pt.SetHandler("/role/delete", roleserviceimpl.RoleDelete)
+
+
+    var userserviceimpl *s.UserServiceImpl
+    pt.SetHandler("/users", userserviceimpl.Users)
+    pt.SetHandler("/user/add", userserviceimpl.UserAdd)
+    pt.SetHandler("/user/update", userserviceimpl.UserUpdate)
+    pt.SetHandler("/user/del", userserviceimpl.UserDel)
+
+
+}
+~~~~~~~~~~~~~~~~~~~~
+#####src\ptdemo\main.go#####package main
+
+import _ "internel_pithy_gen"
+import (
+	ptpkg "changlie/pithy/pkg"
+	pt "changlie/pithy"
+	"changlie/pithy/common"
+	"fmt"
+	"os"
+)
+
+func gen() {
+	ptpkg.GenerateInitHandlerFile()
+}
+
+func serverStartup() {
+	pt.Start()
+}
+
+func main() {
+	if !common.GetConfigBool("dev.mode") {
+		serverStartup()
+		return
+	}
+	if len(os.Args) < 2 {
+		return
+	}
+
+	action := os.Args[1]
+	fmt.Println("action:", action)
+	switch action {
+	case "gen":
+		fmt.Println("generate source file")
+		gen()
+
+	case "run":
+		fmt.Println("start up server!")
+		serverStartup()
+	}
+}
+
+
+
+
+
+~~~~~~~~~~~~~~~~~~~~
+#####src\ptdemo\test.go#####package main
+~~~~~~~~~~~~~~~~~~~~
+#####src\service\employee_service.go#####package service
+
+import (
+	pt "changlie/pithy"
+	"fmt"
+)
+// `rootpath#employee`
+// `get#list`
+func EmployeeList(r pt.Req) {
+	fmt.Println("over### EmployeeList")
+	r.RespJson("service#EmployeeList1111111")
+}
+
+// `post#create`
+func EmployeeCreate(r pt.Req) {
+	fmt.Println("over### EmployeeCreate")
+	r.RespJson("service#EmployeeCreate222222222")
+}
+
+
+~~~~~~~~~~~~~~~~~~~~
+#####src\service\interface\service_interface.go#####package _interface
+
+import (
+	pt "changlie/pithy"
+	s "service"
+)
+
+type UserService interface {
+	Users(r pt.Req)
+	UserAdd(r pt.Req)
+	UserUpdate(r pt.Req)
+	UserDel(r pt.Req)
+}
+
+var userServiceImpl s.UserServiceImpl
+func NewUserService() UserService {
+	return &userServiceImpl
+}
+~~~~~~~~~~~~~~~~~~~~
+#####src\service\role_service.go#####package service
+
+import pt "changlie/pithy"
+
+type RoleServiceImpl struct {}
+
+
+func (role *RoleServiceImpl) RoleList(r pt.Req) {
+    r.RespJson("it's role list.")
+}
+
+func  CreateRole(r pt.Req) {
+    r.RespJson("create role successfully.")
+}
+
+
+func (role *RoleServiceImpl) RoleDelete(r pt.Req) {
+    r.RespJson("delete role finish!")
+}~~~~~~~~~~~~~~~~~~~~
+#####src\service\user_service.go#####package service
+
+import (
+	pt "changlie/pithy"
+	"fmt"
+)
+
+type UserServiceImpl struct{}
+
+func (u *UserServiceImpl) Users(r pt.Req) {
+
+	r.RespJson("UserServiceImpl#Users")
+}
+
+func (u *UserServiceImpl) UserAdd(r pt.Req) {
+	fmt.Println("create user successfully!")
+	r.RespJson("UserServiceImpl#UserAdd1111")
+}
+
+func (u *UserServiceImpl) UserUpdate(r pt.Req) {
+	r.RespJson("UserServiceImpl#UserUpdate")
+}
+
+func (u *UserServiceImpl) UserDel(r pt.Req) {
+	r.RespJson("UserServiceImpl#UserDel")
+}
+
+
+
+~~~~~~~~~~~~~~~~~~~~
+#####start#####
+export GOPATH=`pwd`:/d/software/golangLocalRepo
+
+go run src/ptdemo/main.go gen
+
+go run src/ptdemo/main.go run~~~~~~~~~~~~~~~~~~~~
 

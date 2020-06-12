@@ -1,108 +1,664 @@
-func simpleServer() {
-  http.HandleFunc("/", mainHandler)
-  log.Fatal(http.ListenAndServe(":8888", nil))
-}
+#####common\config.go#####package common
 
-func mainHandler(w http.ResponseWriter,r *http.Request)  {
-  url := r.URL.RawPath
-  fmt.Println(url)
-
-  h := getHandler(url)
-  if h == nil {
-    w.WriteHeader(404)
-    fmt.Fpintln(w, "service is not found!")
-    return 
-  }
-
-  fmt.Fprintf(w, "response for %v \n", url)
-}
-
-var (
-  Urlmap = make(map[uri]Handler)
+import (
+	"bufio"
+	"log"
+	"os"
+	"strconv"
+	"strings"
 )
 
-func getHandler(url string) Handler {
-  u := NewUri(url)
-  for p, h := range Urlmap {
-    if p.equal(u) {
-      return h
+var config = make(map[string]string)
+
+func init() {
+	loadConfig()
+}
+
+func loadConfig() {
+	configFile := "app.conf"
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		return
+	}
+	f, _ := os.Open(configFile)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		keyPair := strings.Split(line, "=")
+		if len(keyPair) < 2 {
+			continue
+		}
+		key := strings.TrimSpace(keyPair[0])
+		val := strings.TrimSpace(keyPair[1])
+		config[key] = val
+		log.Printf("load config: %v=%v \n", key, val)
+	}
+}
+
+func GetConfig(key, def string) string {
+	val, ok := config[key]
+	if ok {
+		return val
+	}else {
+		return def
+	}
+}
+
+func GetConfigBool(key string) bool {
+	val, ok := config[key]
+	if ok {
+		v, err := strconv.ParseBool(val)
+		if err != nil {
+			log.Fatal(key, "is not bool type!")
+		}
+		return v
+	}
+	return false
+}
+
+
+~~~~~~~~~~~~~~~~~~~~
+#####common\error_handler.go#####package common
+
+import "log"
+
+func ExitWhenError(e error) {
+    if e != nil {
+        log.Fatal(e)
     }
-  }
-  return nil
+}
+~~~~~~~~~~~~~~~~~~~~
+#####local_file.go#####package pithy
+
+import (
+	"errors"
+	"io/ioutil"
+	"net/http"
+	"os"
+	"path/filepath"
+)
+
+func localFile(path string) (string, error) {
+	if path == "" || path == "/" {
+		return "", errors.New("don't handle root path")
+	}
+	fp := filepath.Join(Pwd(), "static", path)
+	_, err := os.Open(fp)
+	return fp, err
 }
 
-type uri struct {
-  url string
-  subUrls []string
+func returnLocalFile(w http.ResponseWriter, fp string) {
+	data, err := ioutil.ReadFile(fp)
+	if err != nil {
+		InternalServerError(w, err)
+		return
+	}
+	w.Write(data)
 }
+~~~~~~~~~~~~~~~~~~~~
+#####pkg\generate_source.go#####package pkg
 
-func NewUri(url string) {
-  paths := strings.Split(url, "/")
-  return uri{url, paths}
-}
-
-func (u *uri) equal(target uri) bool {
-  subUrls1 := target.subUrls
-  for i, subUrl := range u.subUrls {
-    if i >= len(subUrls1) {
-      return false
-    }
-    subUrl1 := subUrls1[i]
-    if subUrl != subUrl1 && !strings.HasPrefix(subUrl, ":") {
-      return false
-    }
-  }
-  return true
-}
-
-type Handler func(r Req) Resp
-
-type Req struct {
-  Args map[string]string
-  Header http.Header
-}
-
-func (r *Req) getArg(name string) string {
-  return r.Args[name]
-}
-
-type Resp struct {
-  data interface{}
-  t respType
-}
+import (
+    "bufio"
+    "bytes"
+    "changlie/pithy/common"
+    "fmt"
+    "io/ioutil"
+    "os"
+    "regexp"
+    "strings"
+    "text/template"
+)
 
 const (
-  respJson RespType = 1 << iota
-  respFile
+    PkgName = "internel_pithy_gen"
+    InitHandlerFile = "init_handler.go"
 )
 
-func RespJson(d interface{}) *Resp {
-  return &Resp{
-    data: d,
-    t: respJson,
-  }
+func init() {
+    pkgPath := "src/"+PkgName
+    if _, err := os.Stat(pkgPath); os.IsNotExist(err) {
+        os.MkdirAll(pkgPath, 0666)
+    }
+
+    importPkgInMain()
 }
 
-func RespFile(path string) *Resp {
-  return &Resp{
-    data: d,
-    t: respFile,
-  }
+func importPkgInMain() {
+    srcDir, _ := ioutil.ReadDir("src")
+    for _, f := range srcDir {
+        if !f.IsDir() {
+            continue
+        }
+        subDirPath := "src/"+f.Name()
+        subDir, _ := ioutil.ReadDir(subDirPath)
+        for _, f1 := range subDir {
+            fname := f1.Name()
+            if f1.IsDir() || !strings.HasSuffix(fname, ".go") {
+                continue
+            }
+            fpath := fmt.Sprintf("%v/%v", subDirPath, fname)
+            if isNotMainPkg(fpath) {
+                break
+            }
+            insertImportPkgExpr2main(fpath)
+        }
+    }
 }
+
+func insertImportPkgExpr2main(fpath string) {
+    if existPkgImport(fpath) {
+        return
+    }
+
+    f, _ := os.Open(fpath)
+    scanner := bufio.NewScanner(f)
+    var buf bytes.Buffer
+    var overPkg bool
+    var insert bool
+    //var preLine string
+    for scanner.Scan() {
+        line := scanner.Text()
+        rawLine := strings.TrimSpace(line)
+        buf.WriteString(line)
+        buf.WriteString("\r\n")
+        if strings.HasPrefix(rawLine, "package") {
+            overPkg = true
+        }else if !insert && overPkg {
+            insert = true
+            buf.WriteString(fmt.Sprintf(`import _ "%v"%v`, PkgName, "\r\n"))
+        }
+        //preLine = line
+    }
+    ioutil.WriteFile(fpath, buf.Bytes(), 066)
+}
+
+func existPkgImport(fpath string) bool {
+    keyword := fmt.Sprintf(`_ "%v"`, PkgName)
+    f, _ := os.Open(fpath)
+    scanner := bufio.NewScanner(f)
+    for scanner.Scan() {
+        line := scanner.Text()
+        if strings.Contains(line, keyword) {
+            return true
+        }
+    }
+    return false
+}
+
+func isNotMainPkg(fpath string) bool {
+    f, _ := os.Open(fpath)
+    scanner := bufio.NewScanner(f)
+    for scanner.Scan() {
+        line := strings.TrimSpace(scanner.Text())
+        if strings.HasPrefix(line, "package") {
+            if strings.Contains(line, "main"){
+                return false
+            }else{
+                return true
+            }
+        }
+    }
+    return true
+}
+
+const initHandlerFileTempl = `package {{ .PkgName }}
+
+import pt "{{ .PithyPkg }}"
+import s "{{ .ServicePkg }}"
+
+func init() {
+{{range .HandlerInfos }}    pt.SetHandler("{{ .Url }}", s.{{ .MethodName }})
+{{end}}
+{{range .ServiceInfos -}}
+{{$varname := .VarName}}
+    var {{ $varname }} *s.{{ .ServiceName }}
+{{range .Methods }}
+{{- if not .IsFunc }}    pt.SetHandler("{{ .Url }}", {{ $varname }}.{{ .MethodName }})
+{{ else }}    pt.SetHandler("{{ .Url }}", s.{{ .MethodName }})
+{{end}}
+{{- end}}
+{{end}}
+}
+`
+
+type InitHandlerInfo struct {
+    PkgName string
+    PithyPkg string
+    ServicePkg string
+    ServiceInfos []ServiceInfo
+    HandlerInfos []HandlerInfo
+}
+
+type ServiceInfo struct {
+    ServiceName string
+    Methods []HandlerInfo
+}
+
+func (s *ServiceInfo) VarName() string {
+    return strings.ToLower(s.ServiceName)
+}
+
+type HandlerInfo struct {
+    IsFunc bool
+    HttpMethod string
+    Url string
+    MethodName string
+}
+
+// generate go source file that initialize Handlers Information
+func GenerateInitHandlerFile() {
+    f, err := os.Create(fmt.Sprintf("src/%v/%v", PkgName, InitHandlerFile))
+    common.ExitWhenError(err)
+
+    sp := common.GetConfig("service.pkg", "service")
+
+    data := InitHandlerInfo{
+        PkgName:      PkgName,
+        PithyPkg:     "changlie/pithy",
+        ServicePkg:   sp,
+        ServiceInfos: nil,
+        HandlerInfos: nil,
+    }
+
+    scanForHandlerInfos(&data, sp)
+    //fmt.Println("InitHandlerInfo:", data)
+
+    t := template.Must(template.New("GenerateInitHandlerFile").Parse(initHandlerFileTempl))
+
+    err = t.Execute(f, data)
+    common.ExitWhenError(err)
+}
+
+func scanForHandlerInfos(data *InitHandlerInfo, servicePkg string) {
+    var hs []HandlerInfo
+    var ss []ServiceInfo
+    path := "src/"+servicePkg
+    fs, err := ioutil.ReadDir(path)
+    common.ExitWhenError(err)
+    for _, info := range fs {
+        fname := info.Name()
+        if info.IsDir() || !strings.HasSuffix(fname, ".go") {
+            continue
+        }
+        fpath := fmt.Sprintf("%v/%v", path, fname)
+        subHs, serviceName := getFileInfo(fpath)
+        if serviceName != "" {
+            sinfo := ServiceInfo{
+                ServiceName: serviceName,
+                Methods:     subHs,
+            }
+            ss = append(ss, sinfo)
+        } else {
+            hs = append(hs, subHs...)
+        }
+    }
+    data.HandlerInfos = hs
+    data.ServiceInfos = ss
+}
+
+func getFileInfo(fpath string) ([]HandlerInfo, string) {
+    var hInfos []HandlerInfo
+    var serviceName string
+    f, _ := os.Open(fpath)
+    scanner := bufio.NewScanner(f)
+    for scanner.Scan() {
+        var methodName string
+        line := strings.TrimSpace(scanner.Text())
+        if !strings.HasPrefix(line, "func") {
+            continue
+        }
+        serviceName, methodName = getfuncInfo(line)
+        if isPrivateFunc(methodName) {
+            continue
+        }
+
+        isfunc := serviceName == ""
+        fmt.Println("gen#getFileInfo:", serviceName, methodName, isfunc)
+        url := getUrl(methodName)
+        h := HandlerInfo{
+            IsFunc:     isfunc,
+            HttpMethod: "",
+            Url:        url,
+            MethodName: methodName,
+        }
+        hInfos = append(hInfos, h)
+    }
+    return hInfos, serviceName
+}
+
+func isPrivateFunc(funcName string) bool {
+    b := funcName[0]
+    if b >= 'A' && b <= 'Z' {
+        return false
+    }
+    return true
+}
+
+func getUrl(s string) string{
+    var paths []string
+    var buf bytes.Buffer
+    for i, b := range []byte(s) {
+        if (b >= 'A') && (b <= 'Z') {
+            if i>0 {
+                paths = append(paths, buf.String())
+                buf.Reset()
+            }
+            buf.Write(bytes.ToLower([]byte{b}))
+        }else {
+            buf.WriteByte(b)
+        }
+    }
+    if buf.Len() > 0 {
+        paths = append(paths, buf.String())
+    }
+    url := "/" + strings.Join(paths, "/")
+    return url
+}
+
+var re = regexp.MustCompile(`func\s+(\(\s*[^\)\s]+\s+\*?([^\)\s]+)\s*\)\s+)?(\w+)`)
+func getfuncInfo(line string) (serviceName string, methodName string) {
+    arr := re.FindAllStringSubmatch(line, -1)[0]
+    for i, item := range arr {
+        if i == 2 {
+            serviceName = item
+        }else if i == 3 {
+            methodName = item
+        }
+    }
+    return
+}
+
+
+func GenerateInitStaticResourcesFile() {
+
+}
+
+
+~~~~~~~~~~~~~~~~~~~~
+#####request.go#####package pithy
+
+import (
+	"net/http"
+)
+
+type Req interface {
+	getArg(name string) []string
+	RespJson(d interface{})
+	RespFile(path string)
+}
+
+type DefaultReq struct {
+	Args map[string][]string
+	Header http.Header
+	resp *Resp
+}
+
+func (r *DefaultReq) getArg(name string) []string {
+	return r.Args[name]
+}
+
+func (r *DefaultReq) RespJson(d interface{}) {
+	r.resp = &Resp{
+		data: d,
+		t: respJson,
+	}
+}
+
+func (r *DefaultReq) RespFile(path string) {
+	r.resp = &Resp{
+		data: path,
+		t: respFile,
+	}
+}
+
+
+~~~~~~~~~~~~~~~~~~~~
+#####response.go#####package pithy
+
+import (
+	"fmt"
+	"net/http"
+)
+
+type Resp struct {
+	data interface{}
+	t respType
+}
+
+type respType int
+
+const (
+	respJson respType = 1 << iota
+	respFile
+)
+
 
 func (resp *Resp) isJson() bool {
-  return (resp.t & respJson) != 0
+	return (resp.t & respJson) != 0
 }
 
 func (resp *Resp) isFile() bool {
-  return (resp.t & respFile) != 0
+	return (resp.t & respFile) != 0
+}
+
+func (resp *Resp) String() string {
+	return fmt.Sprintf("%v", resp.data)
 }
 
 type Json interface {
-  JsonString() string
+	JsonString() string
 }
 
 
-func Users(r Req) Resp {
-
+func NotFound(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusNotFound)
+	fmt.Fprintln(w, "service is not found!")
 }
+
+func InternalServerError(w http.ResponseWriter, e error) {
+	w.WriteHeader(http.StatusInternalServerError)
+	fmt.Fprintln(w, "server error: "+e.Error())
+}
+
+func handleResp(w http.ResponseWriter, resp *Resp) {
+	if resp.isJson() {
+		var res string
+		switch val := resp.data.(type) {
+		case string:
+			res = val
+		default:
+			res = "not support temp"
+		}
+		fmt.Fprint(w, res)
+		return
+	}
+
+	if resp.isFile() {
+		path, ok := resp.data.(string)
+		if !ok {
+			NotFound(w)
+			return
+		}
+		fp, err := localFile(path)
+		if err != nil {
+			NotFound(w)
+			return
+		}
+		returnLocalFile(w, fp)
+
+		return
+	}
+
+	w.Write([]byte("request is not support temporarily!"))
+}
+~~~~~~~~~~~~~~~~~~~~
+#####router.go#####package pithy
+
+import (
+	"log"
+	"net/http"
+	"strings"
+)
+
+type HandleFunc func(r Req)
+
+type Handler struct {
+	method string
+	Paths []string
+	Action HandleFunc
+}
+
+var urlmap = make(map[string]Handler)
+
+func getHandler(url string) HandleFunc {
+	for p, h := range urlmap {
+		if p == url {
+			return h.Action
+		}
+	}
+	log.Printf("current urlmap: %v \n", urlmap)
+	log.Printf("service is not found for %v \n", url)
+
+	return nil
+}
+
+func SetHandler(url string, hf HandleFunc) {
+	paths := strings.Split(url, "/")
+	log.Printf("register service %v:%v \n", url, paths)
+	urlmap[url] = Handler{Paths:paths, Action:hf}
+}
+
+func setHandler1(method, url string, hf HandleFunc) {
+	paths := strings.Split(url, "/")
+	log.Printf("register service[%v] %v:%v \n", method, url, paths)
+	urlmap[url] = Handler{method:method, Paths:paths, Action:hf}
+}
+
+func SetGetHandler(url string, hf HandleFunc) {
+	setHandler1(http.MethodGet, url, hf)
+}
+
+func SetPostHandler(url string, hf HandleFunc) {
+	setHandler1(http.MethodPost, url, hf)
+}
+
+func mainHandler(w http.ResponseWriter, r *http.Request)  {
+	url := r.URL.Path
+
+	// if Accessing local file, return local file directly
+	fp, err := localFile(url)
+	if err == nil {
+		returnLocalFile(w, fp)
+		return
+	}
+
+	// if resources exists in cache, retrun it from cache
+	rc := GetResource(url)
+	if rc != nil {
+		w.Write(rc)
+		return
+	}
+
+	queryArgs := r.URL.Query()
+	headers := r.Header
+
+	req := &DefaultReq{Args:queryArgs, Header:headers}
+
+	h := getHandler(url)
+	if h == nil {
+		NotFound(w)
+		return
+	}
+	h(req)
+	if req.resp != nil {
+		handleResp(w, req.resp)
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+
+
+
+
+
+
+
+
+
+~~~~~~~~~~~~~~~~~~~~
+#####server.go#####package pithy
+
+import (
+	"changlie/pithy/common"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"time"
+)
+
+var DevMode bool
+
+// server entry.
+func Start() {
+	DevMode = common.GetConfigBool("dev.mode")
+	if !DevMode {
+		os.Chdir(filepath.Dir(os.Args[0]))
+	}
+
+	http.HandleFunc("/", mainHandler)
+	port := common.GetConfig("server.port", "8888")
+	addr := fmt.Sprintf(":%s", port)
+	log.Printf("server [%v] start up successfully!", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
+}
+
+func Pwd() string {
+	dir, _ := os.Getwd()
+	return dir
+}
+
+func OpenBrowser(url string) {
+	go func() {
+		time.Sleep(time.Second)
+
+		var cmd *exec.Cmd
+		if runtime.GOOS == "windows" {
+			cmd = exec.Command("cmd", "/C", "start", url)
+		} else {
+			cmd = exec.Command("xdg-open", url)
+		}
+		cmd.Run()
+	}()
+}
+~~~~~~~~~~~~~~~~~~~~
+#####static_resources.go#####package pithy
+
+var staticResouces = make(map[string][]byte)
+
+// add static resouces to cache
+func SetSRC(key string, bytes []byte) {
+	staticResouces[key] = bytes
+}
+
+// add static resouces to cache
+func SetSRCByFunc(key string, f func() []byte) {
+	bytes := f()
+	staticResouces[key] = bytes
+}
+
+// get resouces from cache
+func GetResource(key string) []byte {
+	if r, ok := staticResouces[key]; ok {
+		return r
+	}
+	return nil
+}
+~~~~~~~~~~~~~~~~~~~~

@@ -1,116 +1,20 @@
 package pithy
 
 import (
-	"bufio"
-	"errors"
-	"io/ioutil"
 	"log"
 	"net/http"
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
-func mainHandler(w http.ResponseWriter, r *http.Request)  {
-	printReqInfo(r)
-	url := r.URL.Path
+type HandleFunc func(r Req)
 
-	// if Accessing local file, return local file directly
-	fp, err := localFile(url)
-	if err == nil {
-		returnLocalFile(w, fp)
-		return
-	}
-
-	log.Printf("string(): %v; path: %v; rawpath: %v \n", r.URL, r.URL.Path, r.URL.RawPath)
-	queryArgs := r.URL.Query()
-	headers := r.Header
-
-	req := Req{Args:queryArgs, Header:headers}
-
-	h := getHandler(url)
-	if h == nil {
-		NotFound(w)
-		return
-	}
-	resp := h(req)
-	handleResp(w, resp)
+type Handler struct {
+	method string
+	Paths []string
+	Action HandleFunc
 }
 
-func NotFound(w http.ResponseWriter) {
-	w.WriteHeader(http.StatusNotFound)
-	fmt.Fprintln(w, "service is not found!")
-}
-
-func InternalServerError(w http.ResponseWriter, e error) {
-	w.WriteHeader(http.StatusInternalServerError)
-	fmt.Fprintln(w, "server error: "+e.Error())
-}
-
-func handleResp(w http.ResponseWriter, resp *Resp) {
-	if resp.isJson() {
-		var res string
-		switch val := resp.data.(type) {
-		case string:
-			res = val
-		default:
-			res = "not support temp"
-		}
-		fmt.Fprint(w, res)
-		return
-	}
-
-	if resp.isFile() {
-		path, ok := resp.data.(string)
-		if !ok {
-			NotFound(w)
-			return
-		}
-		fp, err := localFile(path)
-		if err != nil {
-			NotFound(w)
-			return
-		}
-		returnLocalFile(w, fp)
-
-		return
-	}
-
-	bufio.NewWriter(w).Write([]byte("not support temp"))
-}
-
-func localFile(path string) (string, error) {
-	if path == "" || path == "/" {
-		return "", errors.New("don't handle root path")
-	}
-	fp := filepath.Join(Pwd(), "static", path)
-	_, err := os.Open(fp)
-	return fp, err
-}
-
-func returnLocalFile(w http.ResponseWriter, fp string) {
-	data, err := ioutil.ReadFile(fp)
-	if err != nil {
-		InternalServerError(w, err)
-		return
-	}
-	bw := bufio.NewWriter(w)
-	bw.Write(data)
-	bw.Flush()
-}
-
-func printReqInfo(r *http.Request) {
-	fmt.Println(r.URL)
-	fmt.Println("head:---------------------")
-	for k, v := range r.Header {
-		fmt.Println(k, v)
-	}
-}
-
-var (
-	urlmap = make(map[string]Handler)
-)
+var urlmap = make(map[string]Handler)
 
 func getHandler(url string) HandleFunc {
 	for p, h := range urlmap {
@@ -126,61 +30,65 @@ func getHandler(url string) HandleFunc {
 
 func SetHandler(url string, hf HandleFunc) {
 	paths := strings.Split(url, "/")
-
+	log.Printf("register service %v:%v \n", url, paths)
 	urlmap[url] = Handler{Paths:paths, Action:hf}
 }
 
-type HandleFunc func(r Req) *Resp
-
-type Handler struct {
-	Paths []string
-	Action HandleFunc
+func setHandler1(method, url string, hf HandleFunc) {
+	paths := strings.Split(url, "/")
+	log.Printf("register service[%v] %v:%v \n", method, url, paths)
+	urlmap[url] = Handler{method:method, Paths:paths, Action:hf}
 }
 
-type Req struct {
-	Args map[string][]string
-	Header http.Header
+func SetGetHandler(url string, hf HandleFunc) {
+	setHandler1(http.MethodGet, url, hf)
 }
 
-func (r *Req) getArg(name string) []string {
-	return r.Args[name]
+func SetPostHandler(url string, hf HandleFunc) {
+	setHandler1(http.MethodPost, url, hf)
 }
 
+func mainHandler(w http.ResponseWriter, r *http.Request)  {
+	url := r.URL.Path
 
-type Resp struct {
-	data interface{}
-	t respType
-}
+	// if Accessing local file, return local file directly
+	fp, err := localFile(url)
+	if err == nil {
+		returnLocalFile(w, fp)
+		return
+	}
 
-type respType int
+	// if resources exists in cache, retrun it from cache
+	rc := GetResource(url)
+	if rc != nil {
+		w.Write(rc)
+		return
+	}
 
-const (
-	respJson respType = 1 << iota
-	respFile
-)
+	queryArgs := r.URL.Query()
+	headers := r.Header
 
-func RespJson(d interface{}) *Resp {
-	return &Resp{
-		data: d,
-		t: respJson,
+	req := &DefaultReq{Args:queryArgs, Header:headers}
+
+	h := getHandler(url)
+	if h == nil {
+		NotFound(w)
+		return
+	}
+	h(req)
+	if req.resp != nil {
+		handleResp(w, req.resp)
+	} else {
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-func RespFile(path string) *Resp {
-	return &Resp{
-		data: path,
-		t: respFile,
-	}
-}
 
-func (resp *Resp) isJson() bool {
-	return (resp.t & respJson) != 0
-}
 
-func (resp *Resp) isFile() bool {
-	return (resp.t & respFile) != 0
-}
 
-type Json interface {
-	JsonString() string
-}
+
+
+
+
+
+

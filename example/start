@@ -1,0 +1,6 @@
+
+export GOPATH=`pwd`:/d/software/golangLocalRepo
+
+go run src/ptdemo/main.go gen
+
+go run src/ptdemo/main.go run

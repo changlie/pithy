@@ -1,7 +1,0 @@
-#!/bin/bash
-
-
-localRepo=/home/changlie/go
-export GOPATH=${localRepo}:`pwd`
-
-go run src/demo/main.go

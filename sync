@@ -2,8 +2,10 @@
 
 import (
 	"bufio"
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -11,18 +13,24 @@ import (
 var config = make(map[string]string)
 
 func init() {
-	loadConfig()
+	LoadConfig()
 }
 
-func loadConfig() {
+func LoadConfig() {
+	fmt.Println("start load config file")
+
 	configFile := "app.conf"
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		fmt.Println(configFile, "not Exist")
 		return
 	}
 	f, _ := os.Open(configFile)
+	abspath, e := filepath.Abs(configFile)
+	fmt.Println("abs path:", abspath, e)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
+		log.Println("raw config keyval pair:", line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -35,6 +43,10 @@ func loadConfig() {
 		config[key] = val
 		log.Printf("load config: %v=%v \n", key, val)
 	}
+}
+
+func SetConfig(key, val string) {
+	config[key] = val
 }
 
 func GetConfig(key, def string) string {
@@ -56,6 +68,10 @@ func GetConfigBool(key string) bool {
 		return v
 	}
 	return false
+}
+
+func Configs() map[string]string {
+	return config
 }
 
 
@@ -98,7 +114,42 @@ func returnLocalFile(w http.ResponseWriter, fp string) {
 	w.Write(data)
 }
 ~~~~~~~~~~~~~~~~~~~~
-#####pkg\generate_source.go#####package pkg
+#####pkg\generate_config_init_file.go#####package pkg
+
+import (
+    "bytes"
+    "changlie/pithy/common"
+    "fmt"
+)
+
+
+func GenConfigInitFile() {
+    var buf bytes.Buffer
+    buf.WriteString(fmt.Sprintf("package %v\n\n", PkgName))
+    buf.WriteString(fmt.Sprintf(`import "%v/common"`, FrameWorkPkg))
+    buf.WriteString("\n\n")
+    buf.WriteString("func init() {\n")
+
+    config := common.Configs()
+    for k, v := range config {
+        if k == "dev.mode" {
+            continue
+        }
+        addConfig(&buf, k, v)
+    }
+    addConfig(&buf, "dev.mode", "false")
+    buf.WriteString("}\n")
+
+    //fmt.Println(buf.String())
+    write(InitConfigFile, buf.Bytes())
+}
+
+func addConfig(buf *bytes.Buffer, k, v string) {
+    buf.WriteString(fmt.Sprintf(`    common.SetConfig("%v", "%v")`, k, v))
+    buf.WriteByte('\n')
+}
+~~~~~~~~~~~~~~~~~~~~
+#####pkg\generate_handler_register_file.go#####package pkg
 
 import (
     "bufio"
@@ -112,18 +163,290 @@ import (
     "text/template"
 )
 
+const initHandlerFileTempl = `package {{ .PkgName }}
+
+import pt "{{ .PithyPkg }}"
+import s "{{ .ServicePkg }}"
+
+func init() {
+{{range .HandlerInfos }}    pt.SetHandler("{{ .Url }}", s.{{ .MethodName }})
+{{end}}
+{{range .ServiceInfos -}}
+{{$varname := .VarName}}
+    var {{ $varname }} *s.{{ .ServiceName }}
+{{range .Methods }}
+{{- if not .IsFunc }}    pt.SetHandler("{{ .Url }}", {{ $varname }}.{{ .MethodName }})
+{{ else }}    pt.SetHandler("{{ .Url }}", s.{{ .MethodName }})
+{{end}}
+{{- end}}
+{{end}}
+}
+`
+
+type InitHandlerInfo struct {
+    PkgName string
+    PithyPkg string
+    ServicePkg string
+    ServiceInfos []ServiceInfo
+    HandlerInfos []HandlerInfo
+}
+
+type ServiceInfo struct {
+    ServiceName string
+    Methods []HandlerInfo
+}
+
+func (s *ServiceInfo) VarName() string {
+    return strings.ToLower(s.ServiceName)
+}
+
+type HandlerInfo struct {
+    IsFunc bool
+    HttpMethod string
+    Url string
+    MethodName string
+}
+
+
+// generate go source file that initialize Handlers Information
+func GenerateInitHandlerFile() {
+    f := newFile(InitHandlerFile);
+
+    sp := common.GetConfig("service.pkg", "service")
+
+    data := InitHandlerInfo{
+        PkgName:      PkgName,
+        PithyPkg:     FrameWorkPkg,
+        ServicePkg:   sp,
+        ServiceInfos: nil,
+        HandlerInfos: nil,
+    }
+
+    scanForHandlerInfos(&data, sp)
+    //fmt.Println("InitHandlerInfo:", data)
+
+    t := template.Must(template.New("GenerateInitHandlerFile").Parse(initHandlerFileTempl))
+
+    err := t.Execute(f, data)
+    common.ExitWhenError(err)
+}
+
+func scanForHandlerInfos(data *InitHandlerInfo, servicePkg string) {
+    var hs []HandlerInfo
+    var ss []ServiceInfo
+    path := "src/"+servicePkg
+    fs, err := ioutil.ReadDir(path)
+    common.ExitWhenError(err)
+    for _, info := range fs {
+        fname := info.Name()
+        if info.IsDir() || !strings.HasSuffix(fname, ".go") {
+            continue
+        }
+        fpath := fmt.Sprintf("%v/%v", path, fname)
+        subHs, serviceName := getFileInfo(fpath)
+        if serviceName != "" {
+            sinfo := ServiceInfo{
+                ServiceName: serviceName,
+                Methods:     subHs,
+            }
+            ss = append(ss, sinfo)
+        } else {
+            hs = append(hs, subHs...)
+        }
+    }
+    data.HandlerInfos = hs
+    data.ServiceInfos = ss
+}
+
+func getFileInfo(fpath string) ([]HandlerInfo, string) {
+    var hInfos []HandlerInfo
+    var serviceName string
+    f, _ := os.Open(fpath)
+    scanner := bufio.NewScanner(f)
+    for scanner.Scan() {
+        var methodName string
+        line := strings.TrimSpace(scanner.Text())
+        if !strings.HasPrefix(line, "func") {
+            continue
+        }
+        serviceName, methodName = getfuncInfo(line)
+        if isPrivateFunc(methodName) {
+            continue
+        }
+
+        isfunc := serviceName == ""
+        //fmt.Println("gen#getFileInfo:", serviceName, methodName, isfunc)
+        url := getUrl(methodName)
+        h := HandlerInfo{
+            IsFunc:     isfunc,
+            HttpMethod: "",
+            Url:        url,
+            MethodName: methodName,
+        }
+        hInfos = append(hInfos, h)
+    }
+    return hInfos, serviceName
+}
+
+func isPrivateFunc(funcName string) bool {
+    b := funcName[0]
+    if b >= 'A' && b <= 'Z' {
+        return false
+    }
+    return true
+}
+
+func getUrl(s string) string{
+    var paths []string
+    var buf bytes.Buffer
+    for i, b := range []byte(s) {
+        if (b >= 'A') && (b <= 'Z') {
+            if i>0 {
+                paths = append(paths, buf.String())
+                buf.Reset()
+            }
+            buf.Write(bytes.ToLower([]byte{b}))
+        }else {
+            buf.WriteByte(b)
+        }
+    }
+    if buf.Len() > 0 {
+        paths = append(paths, buf.String())
+    }
+    url := "/" + strings.Join(paths, "/")
+    return url
+}
+
+var re = regexp.MustCompile(`func\s+(\(\s*[^\)\s]+\s+\*?([^\)\s]+)\s*\)\s+)?(\w+)`)
+func getfuncInfo(line string) (serviceName string, methodName string) {
+    arr := re.FindAllStringSubmatch(line, -1)[0]
+    for i, item := range arr {
+        if i == 2 {
+            serviceName = item
+        }else if i == 3 {
+            methodName = item
+        }
+    }
+    return
+}
+
+
+
+
+
+~~~~~~~~~~~~~~~~~~~~
+#####pkg\generate_static_resource_file.go#####package pkg
+
+import (
+    "bytes"
+    "changlie/pithy/common"
+    "encoding/base64"
+    "fmt"
+    "io/ioutil"
+    "log"
+    "path/filepath"
+    "strings"
+)
+
+type finfo struct {
+    relativePath string
+    content []byte
+}
+
+func GenStaticResInitFile() {
+    var buf bytes.Buffer
+    buf.WriteString(fmt.Sprintf("package %v\n\n", PkgName))
+    buf.WriteString(fmt.Sprintf(`import "%v"`, FrameWorkPkg))
+    buf.WriteString("\n\n")
+    buf.WriteString("func init() {\n")
+
+    var finfos []finfo
+    scanDir4FileInfos("static", &finfos)
+    for _, info := range finfos {
+        addStaticRes(&buf, info.relativePath, info.content)
+    }
+
+    buf.WriteString("}\n")
+
+    write(InitStaticResourceFile, buf.Bytes())
+}
+
+func scanDir4FileInfos(dir string, finfos *[]finfo) {
+    fs, err := ioutil.ReadDir(dir)
+    common.ExitWhenError(err)
+    for _, f := range fs {
+        fname := f.Name()
+        fpath := filepath.Join(dir, fname)
+        if f.IsDir() {
+            scanDir4FileInfos(fpath, finfos)
+            continue
+        }
+
+        bs, _ := ioutil.ReadFile(fpath)
+        url := genUrl(fpath)
+        log.Println("file url:", url)
+        info := finfo{
+            relativePath: url,
+            content:      bs,
+        }
+        *finfos = append(*finfos, info)
+    }
+}
+
+func genUrl(raw string) string {
+    url := strings.ReplaceAll(raw, "\\", "/")
+    if !strings.HasPrefix(url, "/") {
+        url = "/" + url
+    }
+    return url
+}
+
+func addStaticRes(buf *bytes.Buffer, url string, content []byte) {
+    encoded := base64.StdEncoding.EncodeToString(content)
+    buf.WriteString(fmt.Sprintf(`    pithy.SetSRC("%v", "%v")`, url, encoded))
+    buf.WriteByte('\n')
+}
+
+~~~~~~~~~~~~~~~~~~~~
+#####pkg\index.go#####package pkg
+
+import (
+    "bufio"
+    "bytes"
+    "changlie/pithy/common"
+    "fmt"
+    "io/ioutil"
+    "os"
+    "strings"
+)
+
 const (
+    FrameWorkPkg = "changlie/pithy"
     PkgName = "internel_pithy_gen"
     InitHandlerFile = "init_handler.go"
+    InitConfigFile = "init_config.go"
+    InitStaticResourceFile = "init_static_res.go"
 )
 
 func init() {
-    pkgPath := "src/"+PkgName
-    if _, err := os.Stat(pkgPath); os.IsNotExist(err) {
-        os.MkdirAll(pkgPath, 0666)
-    }
-
+    initPkgDir()
     importPkgInMain()
+}
+
+func initPkgDir() {
+    pkgPath := "src/"+PkgName
+    os.MkdirAll(pkgPath, os.ModePerm)
+}
+
+func newFile(path string) *os.File {
+    f, err := os.Create(fmt.Sprintf("src/%v/%v", PkgName, path))
+    common.ExitWhenError(err)
+    return f
+}
+
+func write(fname string, bs []byte) {
+    path := fmt.Sprintf("src/%v/%v", PkgName, fname)
+    ioutil.WriteFile(path, bs, 0666)
 }
 
 func importPkgInMain() {
@@ -203,180 +526,297 @@ func isNotMainPkg(fpath string) bool {
     }
     return true
 }
+~~~~~~~~~~~~~~~~~~~~
+#####pkg\insert_json_tag.go#####package pkg
 
-const initHandlerFileTempl = `package {{ .PkgName }}
+import (
+    "bytes"
+    "changlie/pithy/common"
+    "fmt"
+    "io/ioutil"
+    "log"
+    "path/filepath"
+    "strings"
+)
 
-import pt "{{ .PithyPkg }}"
-import s "{{ .ServicePkg }}"
+type tokenType int
 
-func init() {
-{{range .HandlerInfos }}    pt.SetHandler("{{ .Url }}", s.{{ .MethodName }})
-{{end}}
-{{range .ServiceInfos -}}
-{{$varname := .VarName}}
-    var {{ $varname }} *s.{{ .ServiceName }}
-{{range .Methods }}
-{{- if not .IsFunc }}    pt.SetHandler("{{ .Url }}", {{ $varname }}.{{ .MethodName }})
-{{ else }}    pt.SetHandler("{{ .Url }}", s.{{ .MethodName }})
-{{end}}
-{{- end}}
-{{end}}
-}
-`
+const (
+    tokenString tokenType = 1 << iota
+    tokenStruct
+    tokenScopeOpen
+    tokenScopeClose
+    tokenVar
+    tokenT
+    tokenSpace
+    tokenLF
+    tokenPreAnnotate
+    tokenStartAnnotate
+    Normal
+)
 
-type InitHandlerInfo struct {
-    PkgName string
-    PithyPkg string
-    ServicePkg string
-    ServiceInfos []ServiceInfo
-    HandlerInfos []HandlerInfo
-}
-
-type ServiceInfo struct {
-    ServiceName string
-    Methods []HandlerInfo
-}
-
-func (s *ServiceInfo) VarName() string {
-    return strings.ToLower(s.ServiceName)
-}
-
-type HandlerInfo struct {
-    IsFunc bool
-    HttpMethod string
-    Url string
-    MethodName string
+var tokenMap = map[tokenType]string{
+    tokenString:"string",
+    tokenStruct:"struct",
+    tokenScopeOpen:"open",
+    tokenScopeClose:"close",
+    tokenVar:"variables",
+    tokenT:"type",
+    tokenSpace:"space",
+    tokenLF:"LF",
 }
 
-// generate go source file that initialize Handlers Information
-func GenerateInitHandlerFile() {
-    f, err := os.Create(fmt.Sprintf("src/%v/%v", PkgName, InitHandlerFile))
-    common.ExitWhenError(err)
-
-    sp := common.GetConfig("service.pkg", "service")
-
-    data := InitHandlerInfo{
-        PkgName:      PkgName,
-        PithyPkg:     "changlie/pithy",
-        ServicePkg:   sp,
-        ServiceInfos: nil,
-        HandlerInfos: nil,
-    }
-
-    scanForHandlerInfos(&data, sp)
-    //fmt.Println("InitHandlerInfo:", data)
-
-    t := template.Must(template.New("GenerateInitHandlerFile").Parse(initHandlerFileTempl))
-
-    err = t.Execute(f, data)
-    common.ExitWhenError(err)
+type token struct {
+    data string
+    t tokenType
 }
 
-func scanForHandlerInfos(data *InitHandlerInfo, servicePkg string) {
-    var hs []HandlerInfo
-    var ss []ServiceInfo
-    path := "src/"+servicePkg
-    fs, err := ioutil.ReadDir(path)
-    common.ExitWhenError(err)
-    for _, info := range fs {
-        fname := info.Name()
-        if info.IsDir() || !strings.HasSuffix(fname, ".go") {
+func InsertJsonTag4Struct() {
+    voPkg := common.GetConfig("vo.pkg", "vo")
+    infos, e := ioutil.ReadDir(voPkg)
+    //wd, e := os.Getwd()
+    //log.Println("wd:", wd, "vo", voPkg, infos)
+    common.ExitWhenError(e)
+
+    for _, f := range infos {
+        fname := f.Name()
+        log.Println("vo file:", fname)
+        if f.IsDir() || !strings.HasSuffix(fname, ".go") {
             continue
         }
-        fpath := fmt.Sprintf("%v/%v", path, fname)
-        subHs, serviceName := getFileInfo(fpath)
-        if serviceName != "" {
-            sinfo := ServiceInfo{
-                ServiceName: serviceName,
-                Methods:     subHs,
+
+        path := filepath.Join(voPkg, fname)
+        res := scanFileAndInsertTag(path)
+        ioutil.WriteFile(path, res, 0666)
+    }
+}
+
+func scanFileAndInsertTag(path string) []byte {
+    var res bytes.Buffer
+    bs, e := ioutil.ReadFile(path)
+    common.ExitWhenError(e)
+
+    var tokens []token
+    var state tokenType
+    anno := Normal
+    var tmp []byte
+    lineIndex := 0
+    lineMark := make(map[int]struct{})
+    for i, b := range bs {
+        switch {
+        case (b>='a' && b<='z') || (b>='A' && b<='Z') || b=='_':
+            tmp = append(tmp, b)
+            state = tokenString
+
+        case b==' ' || b=='\t' || b=='\n' || b == '/' || b == '`':
+            if b == '/' {
+                switch anno {
+                case Normal:
+                    anno = tokenPreAnnotate
+                case tokenPreAnnotate:
+                    anno = tokenStartAnnotate
+                }
             }
-            ss = append(ss, sinfo)
-        } else {
-            hs = append(hs, subHs...)
+
+            if anno != tokenStartAnnotate {
+                tokens = addStringToken(&tmp, state, tokens)
+            }
+            state = tokenSpace
+
+
+            _, exist := lineMark[lineIndex]
+            exist = exist || checkNext(&bs, i)
+            if ok, varName := isRightPlace(tokens); ok && !exist {
+                res.WriteString(fmt.Sprintf(" `json:\"%v\"` ", varName))
+                lineMark[lineIndex] = struct{}{}
+            }
+
+            if b=='\n' {
+                lineIndex++
+                anno = Normal
+                tmp = nil
+                tokens = addSingleCharToken(tokens, ';', tokenLF)
+                state = tokenLF
+            }
+
+        case b == '{':
+            if preIsStruct(tokens) {
+                tokens = addSingleCharToken(tokens, b, tokenStruct | tokenScopeOpen)
+            }
+            state = tokenScopeOpen
+
+        case b == '}':
+            if isInStruct(tokens) {
+                tokens = addSingleCharToken(tokens, b, tokenStruct | tokenScopeClose)
+            }
+            state = tokenScopeClose
         }
+
+        res.WriteByte(b)
     }
-    data.HandlerInfos = hs
-    data.ServiceInfos = ss
+    //printTokenList(tokens)
+    //fmt.Println(res.String())
+    return res.Bytes()
 }
 
-func getFileInfo(fpath string) ([]HandlerInfo, string) {
-    var hInfos []HandlerInfo
-    var serviceName string
-    f, _ := os.Open(fpath)
-    scanner := bufio.NewScanner(f)
-    for scanner.Scan() {
-        var methodName string
-        line := strings.TrimSpace(scanner.Text())
-        if !strings.HasPrefix(line, "func") {
-            continue
+func preIsStruct(tokens []token) bool {
+    for i:=len(tokens)-1; i>=0; i-- {
+        t := tokens[i]
+        s := t.data
+        if s == "struct" {
+            return true
         }
-        serviceName, methodName = getfuncInfo(line)
-        if isPrivateFunc(methodName) {
-            continue
+        if s != ";" {
+            return false
         }
-
-        isfunc := serviceName == ""
-        fmt.Println("gen#getFileInfo:", serviceName, methodName, isfunc)
-        url := getUrl(methodName)
-        h := HandlerInfo{
-            IsFunc:     isfunc,
-            HttpMethod: "",
-            Url:        url,
-            MethodName: methodName,
-        }
-        hInfos = append(hInfos, h)
     }
-    return hInfos, serviceName
+    return false
 }
 
-func isPrivateFunc(funcName string) bool {
-    b := funcName[0]
-    if b >= 'A' && b <= 'Z' {
-        return false
-    }
-    return true
-}
-
-func getUrl(s string) string{
-    var paths []string
+func checkNext(rawbs *[]byte, i int) bool {
+    arr := *rawbs
     var buf bytes.Buffer
-    for i, b := range []byte(s) {
-        if (b >= 'A') && (b <= 'Z') {
-            if i>0 {
-                paths = append(paths, buf.String())
-                buf.Reset()
-            }
-            buf.Write(bytes.ToLower([]byte{b}))
-        }else {
-            buf.WriteByte(b)
+    key1 := []byte{'`'}
+    key2 := []byte("json")
+    for ; i<len(arr); i++ {
+        b := arr[i]
+        buf.WriteByte(b)
+        if bytes.Contains(buf.Bytes(), key1) && bytes.Contains(buf.Bytes(), key2) {
+            return true
+        }
+        if b == '\n' || b == '}' {
+            return false
         }
     }
-    if buf.Len() > 0 {
-        paths = append(paths, buf.String())
-    }
-    url := "/" + strings.Join(paths, "/")
-    return url
+    return false
 }
 
-var re = regexp.MustCompile(`func\s+(\(\s*[^\)\s]+\s+\*?([^\)\s]+)\s*\)\s+)?(\w+)`)
-func getfuncInfo(line string) (serviceName string, methodName string) {
-    arr := re.FindAllStringSubmatch(line, -1)[0]
-    for i, item := range arr {
-        if i == 2 {
-            serviceName = item
-        }else if i == 3 {
-            methodName = item
-        }
+
+
+func isRightPlace(tokens []token) (ok bool, varName string) {
+    tLen := len(tokens)
+    if tLen < 2 {
+        return
     }
+    pre1T := tokens[tLen-1]
+    pre2T := tokens[tLen-2]
+    if pre1T.t == tokenT && pre2T.t == tokenVar {
+        return true, titleToLower(pre2T.data)
+    }
+
     return
 }
 
+func titleToLower(s string) string {
+    return strings.ToLower(s[:1]) + s[1:]
+}
 
-func GenerateInitStaticResourcesFile() {
+func isType(tokens []token) bool {
+    tLen := len(tokens)
+    if tLen == 0 {
+        return false
+    }
+    preT := tokens[tLen-1]
+    if preT.t == tokenVar {
+        return true
+    }
+    return false
+}
 
+func isVar(tokens []token) bool {
+    tLen := len(tokens)
+    if tLen == 0 {
+        return false
+    }
+    preT := tokens[tLen-1]
+    if isInStruct(tokens) && preT.data == ";" {
+        return true
+    }
+    return false
+}
+
+func isInStruct(tokens []token) bool {
+    for i:=len(tokens)-1; i>=0; i-- {
+        t := tokens[i]
+
+        if t.t == (tokenStruct | tokenScopeOpen) {
+            return true
+        }
+        if t.t == (tokenStruct | tokenScopeClose) || t.data == "}" || t.data == "struct" || t.data == "type" || t.data == "var"{
+            return false
+        }
+    }
+    return false
 }
 
 
+func addSingleCharToken(tokens []token, b byte, ttype tokenType) []token {
+    t := token{
+        data:  string(b),
+        t:     ttype,
+    }
+    tokens = append(tokens, t)
+    return tokens
+}
+
+func addStringToken(arr *[]byte, state tokenType, tokens []token) []token {
+    tmp := *arr
+    if len(tmp) == 0 || state != tokenString{
+        return tokens
+    }
+    var ttype tokenType
+    if string(tmp) == "struct" {
+        ttype = tokenStruct
+    } else if isVar(tokens) {
+        ttype = tokenVar
+    } else if isType(tokens) {
+        ttype = tokenT
+    }
+
+    t := token{
+        data:  string(tmp),
+        t:     ttype,
+    }
+    tokens = append(tokens, t)
+
+    *arr = nil
+
+    return tokens
+}
+
+
+func printTokenList(tokens []token) {
+    for _, t := range tokens {
+        log.Printf("|%v -> %v|", t.data, tokenMap[t.t])
+    }
+    log.Println("=============================================")
+}
+
+func printByte(b byte) {
+    if b==' '{
+        fmt.Print("空格")
+    }else if b=='\t' {
+        fmt.Print("\\t")
+    }else if b=='\n' {
+        fmt.Print("\\n")
+    }else{
+        fmt.Print(string(b))
+    }
+}
+
+func printByte1(b byte) {
+    var res string
+    if b==' '{
+        res = "空格"
+    }else if b=='\t' {
+        res = "\\t"
+    }else if b=='\n' {
+        res = "\\n"
+    }else{
+        res = string(b)
+    }
+    fmt.Println("printByte1:", res)
+}
 ~~~~~~~~~~~~~~~~~~~~
 #####request.go#####package pithy
 
@@ -414,13 +854,23 @@ func (r *DefaultReq) RespFile(path string) {
 	}
 }
 
+func (r *DefaultReq) RespText(path string) {
+    r.resp = &Resp{
+        data: path,
+        t: respFile,
+    }
+}
+
 
 ~~~~~~~~~~~~~~~~~~~~
 #####response.go#####package pithy
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"reflect"
 )
 
 type Resp struct {
@@ -432,7 +882,8 @@ type respType int
 
 const (
 	respJson respType = 1 << iota
-	respFile
+    respFile
+	respText
 )
 
 
@@ -442,6 +893,10 @@ func (resp *Resp) isJson() bool {
 
 func (resp *Resp) isFile() bool {
 	return (resp.t & respFile) != 0
+}
+
+func (resp *Resp) isText() bool {
+    return (resp.t & respText) != 0
 }
 
 func (resp *Resp) String() string {
@@ -466,12 +921,23 @@ func InternalServerError(w http.ResponseWriter, e error) {
 func handleResp(w http.ResponseWriter, resp *Resp) {
 	if resp.isJson() {
 		var res string
-		switch val := resp.data.(type) {
+		d := resp.data
+		switch val := d.(type) {
 		case string:
 			res = val
+		case Json:
+			res = val.JsonString()
 		default:
-			res = "not support temp"
+			bs, err := json.Marshal(d)
+			if err == nil {
+				res = string(bs)
+			} else {
+				msg := fmt.Sprintf("json encode error: %v", d)
+				log.Println(msg, err)
+				res = msg
+			}
 		}
+
 		fmt.Fprint(w, res)
 		return
 	}
@@ -494,12 +960,106 @@ func handleResp(w http.ResponseWriter, resp *Resp) {
 
 	w.Write([]byte("request is not support temporarily!"))
 }
+
+func isSlice(v interface{}) bool {
+	val := reflect.ValueOf(v)
+    return val.Kind() == reflect.Slice
+}
+
+func isMap(v interface{}) bool {
+	val := reflect.ValueOf(v)
+    return val.Kind() == reflect.Map
+}
+
+func isStruct(v interface{}) bool {
+	val := reflect.ValueOf(v)
+	return val.Kind() == reflect.Struct
+}
+~~~~~~~~~~~~~~~~~~~~
+#####response_test.go#####package pithy
+
+import (
+    "bytes"
+    "encoding/json"
+    "fmt"
+    "reflect"
+    "testing"
+)
+
+func Test_sliceJson(t *testing.T){
+    arr1 := []interface{}{1, false, "name"}
+    bs, err := json.Marshal(arr1)
+    fmt.Println(string(bs), err)
+
+    arr2 := []User{
+        {Name: "changlie", Id:   18, },
+        {Name: "tack", Id:   110, },
+    }
+    bs, err = json.Marshal(arr2)
+    fmt.Println(string(bs), err)
+    fmt.Println("slice assert: ", isSlice(arr1))
+    fmt.Println("slice assert: ", isSlice(arr2))
+    fmt.Println("slice assert: ", isSlice(1))
+    fmt.Println("slice assert: ", isSlice(false))
+}
+
+
+
+func Test_jsonResp(t *testing.T)  {
+    u := User{
+        Name: "changlie",
+        Id:   18,
+    }
+    u1 := &User{
+        Name: "tack",
+        Id:   110,
+    }
+    var v interface{} = u1
+    if val, ok := v.(Json); ok {
+        fmt.Println(val, ok)
+    }
+
+    fmt.Println("u json val:", u.JsonString())
+    fmt.Println("u1 json val:", u1.JsonString())
+
+
+
+
+
+    ty := reflect.TypeOf(u)
+    if ty.Implements(reflect.TypeOf((*Json)(nil)).Elem()) {
+        fmt.Println("Support !!!")
+    }else {
+        fmt.Println()
+    }
+    ty1 := reflect.TypeOf(u1)
+    if ty1.Implements(reflect.TypeOf((*Json)(nil)).Elem()) {
+        fmt.Println("pointer type Support !!!")
+    }
+}
+
+type User struct {
+    Name string
+    Id int
+}
+
+func (u *User) JsonString() string {
+    var buf bytes.Buffer
+    buf.WriteString("{")
+    buf.WriteString(fmt.Sprintf(`"name":"%v",`, u.Name))
+    buf.WriteString(fmt.Sprintf(`"id":%v`, u.Id))
+    buf.WriteString("}")
+    return buf.String()
+}
 ~~~~~~~~~~~~~~~~~~~~
 #####router.go#####package pithy
 
 import (
+	"fmt"
 	"log"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 )
 
@@ -545,9 +1105,9 @@ func SetPostHandler(url string, hf HandleFunc) {
 	setHandler1(http.MethodPost, url, hf)
 }
 
-func mainHandler(w http.ResponseWriter, r *http.Request)  {
+func mainHandler(w http.ResponseWriter, r *http.Request) {
 	url := r.URL.Path
-
+	fmt.Println("url:", url)
 	// if Accessing local file, return local file directly
 	fp, err := localFile(url)
 	if err == nil {
@@ -557,7 +1117,11 @@ func mainHandler(w http.ResponseWriter, r *http.Request)  {
 
 	// if resources exists in cache, retrun it from cache
 	rc := GetResource(url)
+	fmt.Println("GetResource:", url, rc)
 	if rc != nil {
+		ext := filepath.Ext(url)
+		contentType := mime.TypeByExtension(ext)
+		w.Header().Set("Content-Type", contentType)
 		w.Write(rc)
 		return
 	}
@@ -641,23 +1205,35 @@ func OpenBrowser(url string) {
 ~~~~~~~~~~~~~~~~~~~~
 #####static_resources.go#####package pithy
 
-var staticResouces = make(map[string][]byte)
+import (
+	"encoding/base64"
+	"log"
+)
+
+var staticResouces = make(map[string]string)
 
 // add static resouces to cache
-func SetSRC(key string, bytes []byte) {
-	staticResouces[key] = bytes
+func SetSRC(key string, s string) {
+	staticResouces[key] = s
 }
 
 // add static resouces to cache
-func SetSRCByFunc(key string, f func() []byte) {
-	bytes := f()
-	staticResouces[key] = bytes
+func SetSRCByFunc(key string, f func() string) {
+	s := f()
+	staticResouces[key] = s
 }
 
 // get resouces from cache
 func GetResource(key string) []byte {
-	if r, ok := staticResouces[key]; ok {
-		return r
+	r, ok := staticResouces[key]
+	//fmt.Println(key, ok, r)
+	if ok {
+		decoded, err := base64.StdEncoding.DecodeString(r)
+		if err == nil {
+			return decoded
+		}
+		log.Println("decode error:", err)
+		return []byte(r)
 	}
 	return nil
 }
